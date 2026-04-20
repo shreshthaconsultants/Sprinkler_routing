@@ -202,19 +202,78 @@
   seg-list
 )
 
-;; ─── Draw routing lines in ZWCAD ─────────────────────────────────────────────
-(defun draw-routing (segments layer-name / seg prev-layer)
+;; ─── Get segment direction: "H" for horizontal, "V" for vertical ────────────
+(defun segment-dir (seg / tol)
+  (setq tol 1e-6)
+  (if (< (abs (- (nth 3 seg) (nth 1 seg))) tol) "H" "V")
+)
+
+;; ─── Check if two points are within tolerance ──────────────────────────────────
+(defun pts-equal (p1 p2 / tol)
+  (setq tol 1e-6)
+  (and (< (abs (- (car p1) (car p2))) tol)
+       (< (abs (- (cadr p1) (cadr p2))) tol))
+)
+
+;; ─── Draw routing polylines grouped by direction ──────────────────────────────
+(defun draw-routing (segments layer-name / i seg seg-direction cur-dir cur-pts pt prev-layer polycount last-end tol)
   (ensure-layer layer-name 1)
   (setq prev-layer (getvar "CLAYER"))
   (setvar "CLAYER" layer-name)
-  (foreach seg segments
-    (command "._LINE"
-      (list (nth 0 seg) (nth 1 seg) 0.0)
-      (list (nth 2 seg) (nth 3 seg) 0.0)
-      ""))
+  (setq polycount 0)
+  (setq cur-pts '())
+  (setq cur-dir nil)
+  (setq last-end nil)
+  (setq tol 1e-6)
+
+  (setq i 0)
+  (while (< i (length segments))
+    (setq seg (nth i segments))
+    (setq seg-direction (segment-dir seg))
+
+    (if (null cur-dir)
+      (progn
+        (setq cur-dir seg-direction)
+        (setq cur-pts (list (list (nth 0 seg) (nth 1 seg) 0.0)
+                           (list (nth 2 seg) (nth 3 seg) 0.0)))
+        (setq last-end (list (nth 2 seg) (nth 3 seg)))
+      )
+      (if (and (= seg-direction cur-dir)
+               (pts-equal last-end (list (nth 0 seg) (nth 1 seg))))
+        (progn
+          (setq cur-pts (append cur-pts (list (list (nth 2 seg) (nth 3 seg) 0.0))))
+          (setq last-end (list (nth 2 seg) (nth 3 seg)))
+        )
+        (progn
+          (if (>= (length cur-pts) 2)
+            (progn
+              (command "._PLINE")
+              (foreach pt cur-pts (command pt))
+              (command "")
+              (setq polycount (1+ polycount))
+            )
+          )
+          (setq cur-dir seg-direction)
+          (setq cur-pts (list (list (nth 0 seg) (nth 1 seg) 0.0)
+                             (list (nth 2 seg) (nth 3 seg) 0.0)))
+          (setq last-end (list (nth 2 seg) (nth 3 seg)))
+        )
+      )
+    )
+    (setq i (1+ i))
+  )
+
+  (if (>= (length cur-pts) 2)
+    (progn
+      (command "._PLINE")
+      (foreach pt cur-pts (command pt))
+      (command "")
+      (setq polycount (1+ polycount))
+    )
+  )
+
   (setvar "CLAYER" prev-layer)
-  (princ (strcat "\n[SPRINKLER] Drew " (itoa (length segments))
-                 " pipe segments on layer " layer-name "."))
+  (princ (strcat "\n[SPRINKLER] Drew " (itoa polycount) " polylines on layer " layer-name "."))
 )
 
 ;; ─── Collect ALL sprinkler INSERT points on a layer (anywhere) ──────────────
@@ -297,60 +356,64 @@
                             room-idx routed-count
                             json-body response all-segs)
 
-  (princ "\n╔══════════════════════════════════════════╗")
-  (princ "\n║   SPRINKLER AUTO ROUTING  v1.0           ║")
-  (princ "\n║   (per-polyline point-in-polygon)        ║")
-  (princ "\n╚══════════════════════════════════════════╝")
+  (princ "\n╔═══════════════════════════════════════════════════════╗")
+  (princ "\n║        SPRINKLER AUTO ROUTING SYSTEM v2.1             ║")
+  (princ "\n║        Shrestha Consultants - Design Module           ║")
+  (princ "\n║        Intelligent Pipe Routing & Optimization        ║")
+  (princ "\n╚═══════════════════════════════════════════════════════╝")
   (princ "\n")
 
   ;; ── Step 1: Outer architecture rectangle ────────────────────────────────
-  (princ "\n[1/5] Select the OUTER architecture rectangle.")
-  (setq sel-ent (car (entsel "\n  Click on the outer boundary polyline: ")))
+  (princ "\n[STEP 1/5] Select Project Boundary")
+  (princ "\n───────────────────────────────────────────────────────")
+  (setq sel-ent (car (entsel "\n  ▸ Click on the outer boundary polyline: ")))
   (if (null sel-ent)
-    (progn (princ "\n[ERROR] No entity selected. Aborting.") (exit)))
+    (progn (princ "\n\n✗ ERROR: No boundary selected. Operation cancelled.") (exit)))
 
   (setq ent-type (cdr (assoc 0 (entget sel-ent))))
   (if (not (or (= ent-type "LWPOLYLINE") (= ent-type "POLYLINE")))
-    (progn (princ "\n[ERROR] Outer selection must be a polyline. Aborting.")
+    (progn (princ "\n✗ ERROR: Selected object must be a polyline. Please select a valid polyline.")
            (exit)))
 
   (setq outer-verts (get-pline-vertices sel-ent))
   (setq outer-bb (verts-bbox outer-verts))
   (if (null outer-bb)
-    (progn (princ "\n[ERROR] Could not read outer polyline. Aborting.") (exit)))
+    (progn (princ "\n✗ ERROR: Cannot read polyline vertices. Ensure polyline is valid.") (exit)))
 
   (setq oxmin (nth 0 outer-bb)  oymin (nth 1 outer-bb)
         oxmax (nth 2 outer-bb)  oymax (nth 3 outer-bb))
 
-  (princ (strcat "\n  Outer bbox: (" (num->str oxmin) "," (num->str oymin)
-                 ") -> (" (num->str oxmax) "," (num->str oymax) ")"))
+  (princ (strcat "\n  ✓ Boundary imported. Area: (" (num->str oxmin) "," (num->str oymin)
+                 ") to (" (num->str oxmax) "," (num->str oymax) ")"))
 
   ;; ── Step 2: Sprinkler layer ─────────────────────────────────────────────
-  (princ "\n\n[2/5] Enter the SPRINKLER block layer name.")
-  (setq sprinkler-layer (getstring T "\n  Sprinkler layer: "))
+  (princ "\n\n[STEP 2/5] Configure Sprinkler Layer")
+  (princ "\n───────────────────────────────────────────────────────")
+  (setq sprinkler-layer (getstring T "\n  ▸ Enter sprinkler block layer name: "))
   (if (or (null sprinkler-layer) (= sprinkler-layer ""))
-    (progn (princ "\n[ERROR] Empty sprinkler layer. Aborting.") (exit)))
+    (progn (princ "\n✗ ERROR: Layer name cannot be empty.") (exit)))
 
   ;; ── Step 3: Inside-box (room polylines) layer ──────────────────────────
-  (princ "\n\n[3/5] Enter the INSIDE-BOX (room polylines) layer name.")
-  (setq box-layer (getstring T "\n  Inside-box layer: "))
+  (princ "\n\n[STEP 3/5] Configure Room Layer")
+  (princ "\n───────────────────────────────────────────────────────")
+  (setq box-layer (getstring T "\n  ▸ Enter room polylines layer name: "))
   (if (or (null box-layer) (= box-layer ""))
-    (progn (princ "\n[ERROR] Empty inside-box layer. Aborting.") (exit)))
+    (progn (princ "\n✗ ERROR: Layer name cannot be empty.") (exit)))
 
   ;; ── Step 4: Gather data ─────────────────────────────────────────────────
-  (princ "\n\n[4/5] Gathering sprinklers and room polylines...")
+  (princ "\n\n[STEP 4/5] Analyzing Project Data")
+  (princ "\n───────────────────────────────────────────────────────")
 
   (setq all-sprinklers (collect-all-sprinklers sprinkler-layer))
-  (princ (strcat "\n  Total sprinklers on layer '" sprinkler-layer "': "
-                 (itoa (length all-sprinklers))))
+  (princ (strcat "\n  ✓ Found " (itoa (length all-sprinklers)) " sprinkler device(s)"))
 
   (setq rooms (collect-room-polys box-layer oxmin oymin oxmax oymax))
-  (princ (strcat "\n  Room polylines found: " (itoa (length rooms))))
+  (princ (strcat "\n  ✓ Found " (itoa (length rooms)) " room zone(s)"))
 
   (if (null rooms)
-    (progn (princ "\n[ERROR] No room polylines found. Aborting.") (exit)))
+    (progn (princ "\n\n✗ ERROR: No room zones detected. Ensure room layer is correctly named.") (exit)))
   (if (null all-sprinklers)
-    (progn (princ "\n[ERROR] No sprinkler blocks found. Aborting.") (exit)))
+    (progn (princ "\n\n✗ ERROR: No sprinkler devices detected. Ensure sprinkler layer is correctly named.") (exit)))
 
   ;; ── Build per-room data using real point-in-polygon ─────────────────────
   (setq boxes-data '())
@@ -362,8 +425,7 @@
     ;; Use real polygon test, not bbox
     (setq room-pts (pts-in-poly all-sprinklers room-verts))
 
-    (princ (strcat "\n    Room #" (itoa (1+ room-idx))
-                   " : " (itoa (length room-pts)) " sprinkler(s) inside polygon"))
+    (princ (strcat "\n    Zone " (itoa (1+ room-idx)) " → " (itoa (length room-pts)) " device(s)"))
 
     (if (>= (length room-pts) 2)
       (progn
@@ -381,47 +443,66 @@
   )
 
   (if (null boxes-data)
-    (progn (princ "\n[ERROR] No room has >=2 sprinklers inside it. Nothing to route.")
+    (progn (princ "\n\n✗ ERROR: No zone has 2+ devices. Routing requires minimum 2 devices per zone.")
            (exit)))
 
-  (princ (strcat "\n  " (itoa routed-count)
-                 " room(s) will be routed independently."))
+  (princ (strcat "\n  ✓ " (itoa routed-count)
+                 " zone(s) ready for intelligent routing"))
 
   ;; ── Step 5: Send to backend & draw ──────────────────────────────────────
-  (princ "\n\n[5/5] Sending request to /route_multi ...")
+  (princ "\n\n[STEP 5/5] Generate Optimal Routing")
+  (princ "\n───────────────────────────────────────────────────────")
   (setq json-body (build-multi-json boxes-data))
 
-  (princ "\n[DEBUG] JSON body (first 300 chars):")
-  (princ (substr json-body 1 300))
-
+  (princ "\n  ⟳ Connecting to routing engine...")
   (setq response (http-post "http://localhost:8000/route_multi" json-body))
 
   (if (null response)
     (progn
-      (princ "\n[ERROR] No response from backend. Is the FastAPI server running?")
-      (princ "\n        Start it with:  uvicorn main:app --reload --port 8000")
+      (princ "\n\n✗ ERROR: Routing engine not responding.")
+      (princ "\n  Please ensure the backend service is running:")
+      (princ "\n  → uvicorn main:app --reload --port 8000")
       (exit)))
 
-  (princ "\n[SPRINKLER] Response received from backend.")
+  (princ "\n  ✓ Route optimization complete.")
 
   (setq all-segs (parse-segments response))
   (if (null all-segs)
-    (progn (princ "\n[ERROR] Could not parse segments from response.") (exit)))
+    (progn (princ "\n✗ ERROR: Cannot parse routing solution from engine.") (exit)))
 
   (draw-routing all-segs "ROUTING_PIPE")
 
-  (princ "\n\n╔══════════════════════════════════════════╗")
-  (princ "\n║   SPRINKLER ROUTING COMPLETE!            ║")
-  (princ (strcat "\n║   Rooms routed    : " (itoa routed-count)))
-  (princ (strcat "\n║   Segments drawn  : " (itoa (length all-segs))))
-  (princ "\n╚══════════════════════════════════════════╝")
-  (princ)
+  (princ "\n\n╔═══════════════════════════════════════════════════════╗")
+  (princ "\n║              ✓ ROUTING COMPLETE                        ║")
+  (princ "\n├───────────────────────────────────────────────────────┤")
+  (princ (strcat "\n│  Zones Processed     : " (itoa routed-count) "                               │"))
+  (princ (strcat "\n│  Pipe Segments      : " (itoa (length all-segs)) "                              │"))
+  (princ "\n│  Color Layer        : ROUTING_PIPE (Red)               │")
+  (princ "\n├───────────────────────────────────────────────────────┤")
+  (princ "\n│  Design is ready for review and export                │")
+  (princ "\n╚═══════════════════════════════════════════════════════╝")
+  (princ "\n")
 )
 
 ;; ─── Load confirmation ────────────────────────────────────────────────────────
-(princ "\n[SPRINKLER_ROUTE v2.1] Plugin loaded successfully.")
-(princ "\n  Usage: Type SPRINKLER_ROUTE at the ZWCAD command prompt.")
-(princ "\n  Flow : outer rect -> sprinkler layer -> inside-box layer")
-(princ "\n  NEW  : each sprinkler is assigned to the polyline that")
-(princ "\n         geometrically contains it (point-in-polygon).")
+(princ "\n╔═══════════════════════════════════════════════════════╗")
+(princ "\n║     SPRINKLER ROUTING MODULE v2.1 - READY             ║")
+(princ "\n║     Shrestha Consultants - ZWCAD Integration         ║")
+(princ "\n╚═══════════════════════════════════════════════════════╝")
+(princ "\n")
+(princ "\n  COMMAND:  Type 'SPRINKLER_ROUTE' in ZWCAD console")
+(princ "\n")
+(princ "\n  WORKFLOW:")
+(princ "\n    1. Select outer boundary polyline")
+(princ "\n    2. Enter sprinkler device layer name")
+(princ "\n    3. Enter room zone layer name")
+(princ "\n    4. Review analysis results")
+(princ "\n    5. Automatic routing + visual output")
+(princ "\n")
+(princ "\n  FEATURES:")
+(princ "\n    ✓ Intelligent path optimization (A* algorithm)")
+(princ "\n    ✓ Zone-based routing analysis")
+(princ "\n    ✓ Polyline grouping by direction")
+(princ "\n    ✓ Point-in-polygon device assignment")
+(princ "\n")
 (princ)
